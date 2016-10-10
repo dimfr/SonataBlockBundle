@@ -22,6 +22,7 @@ use Sonata\BlockBundle\Model\BlockInterface;
 use Sonata\BlockBundle\Util\RecursiveBlockIterator;
 use Sonata\Cache\CacheAdapterInterface;
 use Sonata\Cache\CacheManagerInterface;
+use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\EventDispatcher\EventDispatcherInterface;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Stopwatch\Stopwatch;
@@ -30,39 +31,43 @@ use Symfony\Component\Templating\Helper\Helper;
 class BlockHelper extends Helper
 {
     /**
+     * @var ContainerInterface
+     */
+    protected $container;
+    /**
      * @var BlockServiceManagerInterface
      */
-    private $blockServiceManager;
+    protected $blockServiceManager;
 
     /**
      * @var CacheManagerInterface
      */
-    private $cacheManager;
+    protected $cacheManager;
 
     /**
      * @var array
      */
-    private $cacheBlocks;
+    protected $cacheBlocks;
 
     /**
      * @var BlockRendererInterface
      */
-    private $blockRenderer;
+    protected $blockRenderer;
 
     /**
      * @var BlockContextManagerInterface
      */
-    private $blockContextManager;
+    protected $blockContextManager;
 
     /**
      * @var HttpCacheHandlerInterface
      */
-    private $cacheHandler;
+    protected $cacheHandler;
 
     /**
      * @var EventDispatcherInterface
      */
-    private $eventDispatcher;
+    protected $eventDispatcher;
 
     /**
      * This property is a state variable holdings all assets used by the block for the current PHP request
@@ -70,49 +75,44 @@ class BlockHelper extends Helper
      *
      * @var array
      */
-    private $assets;
+    protected $assets;
 
     /**
      * @var array
      */
-    private $traces;
+    protected $traces;
 
     /**
      * @var Stopwatch
      */
-    private $stopwatch;
+    protected $stopwatch;
 
     /**
-     * @param BlockServiceManagerInterface $blockServiceManager
-     * @param array                        $cacheBlocks
-     * @param BlockRendererInterface       $blockRenderer
-     * @param BlockContextManagerInterface $blockContextManager
-     * @param EventDispatcherInterface     $eventDispatcher
-     * @param CacheManagerInterface        $cacheManager
-     * @param HttpCacheHandlerInterface    $cacheHandler
-     * @param Stopwatch                    $stopwatch
+     * BlockHelper constructor.
+     *
+     * @param ContainerInterface $container
      */
-    public function __construct(BlockServiceManagerInterface $blockServiceManager, array $cacheBlocks, BlockRendererInterface $blockRenderer,
-                                BlockContextManagerInterface $blockContextManager, EventDispatcherInterface $eventDispatcher,
-                                CacheManagerInterface $cacheManager = null, HttpCacheHandlerInterface $cacheHandler = null, Stopwatch $stopwatch = null)
+    public function __construct(ContainerInterface $container)
     {
-        $this->blockServiceManager = $blockServiceManager;
-        $this->cacheBlocks = $cacheBlocks;
-        $this->blockRenderer = $blockRenderer;
-        $this->eventDispatcher = $eventDispatcher;
-        $this->cacheManager = $cacheManager;
-        $this->blockContextManager = $blockContextManager;
-        $this->cacheHandler = $cacheHandler;
-        $this->stopwatch = $stopwatch;
+        $this->blockServiceManager = $container->get('sonata.block.manager');
+        $this->cacheBlocks = $container->getParameter('sonata_block.cache_blocks');
+        $this->blockRenderer = $container->get('sonata.block.renderer');
+        $this->eventDispatcher = $container->get('event_dispatcher');
+        $this->cacheManager = $container->has('sonata.cache.manager') ? $container->get('sonata.cache.manager') : null;
+        $this->blockContextManager = $container->get('sonata.block.context_manager');
+        $this->cacheHandler = $container->has('sonata.block.cache.handler.default') ? $container->get('sonata.block.cache.handler.default') : null;
+        $this->stopwatch = $container->has('debug.stopwatch') ? $container->get('debug.stopwatch') : null;
 
-        $this->assets = array(
-            'js' => array(),
-            'css' => array(),
-        );
+        $this->container = $container;
 
-        $this->traces = array(
-            '_events' => array(),
-        );
+        $this->assets = [
+            'js'  => [],
+            'css' => [],
+        ];
+
+        $this->traces = [
+            '_events' => [],
+        ];
     }
 
     /**
@@ -125,23 +125,29 @@ class BlockHelper extends Helper
 
     /**
      * @param string $media    Unused, only kept to not break existing code
-     * @param string $basePath Base path to prepend to the stylesheet urls
+     * @param string $basePath Base path to prepend to the stylesheet urls.
      *
      * @return array|string
      */
     public function includeJavascripts($media, $basePath = '')
     {
-        $html = '';
-        foreach ($this->assets['js'] as $javascript) {
-            $html .= "\n".sprintf('<script src="%s%s" type="text/javascript"></script>', $basePath, $javascript);
+
+        $parts = [];
+
+        foreach ($this->assets['js'] as $js) {
+            if ($js[0] === '@') {
+                $parts[] = $this->getBaseAssetExtension()->asseticJs(ltrim($js, '@'));
+            } else {
+                $parts[] = sprintf('<script src="%s%s" type="text/javascript"></script>'.PHP_EOL, $basePath, $js);
+            }
         }
 
-        return $html;
+        return implode('', $parts);
     }
 
     /**
      * @param string $media    The css media type to use: all|screen|...
-     * @param string $basePath Base path to prepend to the stylesheet urls
+     * @param string $basePath Base path to prepend to the stylesheet urls.
      *
      * @return array|string
      */
@@ -151,15 +157,17 @@ class BlockHelper extends Helper
             return '';
         }
 
-        $html = sprintf("<style type='text/css' media='%s'>", $media);
+        $parts = [];
 
         foreach ($this->assets['css'] as $stylesheet) {
-            $html .= "\n".sprintf('@import url(%s%s);', $basePath, $stylesheet);
+            if ($stylesheet[0] === '@') {
+                $parts[] = $this->getBaseAssetExtension()->asseticCss(ltrim($stylesheet, '@'));
+            } else {
+                $parts[] = sprintf("<style type='text/css' media='%s'>%s</style>".PHP_EOL, $media, $stylesheet);
+            }
         }
 
-        $html .= "\n</style>";
-
-        return $html;
+        return implode('', $parts);
     }
 
     /**
@@ -168,7 +176,7 @@ class BlockHelper extends Helper
      *
      * @return string
      */
-    public function renderEvent($name, array $options = array())
+    public function renderEvent($name, array $options = [])
     {
         $eventName = sprintf('sonata.block.event.%s', $name);
 
@@ -181,12 +189,12 @@ class BlockHelper extends Helper
         }
 
         if ($this->stopwatch) {
-            $this->traces['_events'][uniqid()] = array(
+            $this->traces['_events'][uniqid()] = [
                 'template_code' => $name,
-                'event_name' => $eventName,
-                'blocks' => $this->getEventBlocks($event),
-                'listeners' => $this->getEventListeners($eventName),
-            );
+                'event_name'    => $eventName,
+                'blocks'        => $this->getEventBlocks($event),
+                'listeners'     => $this->getEventListeners($eventName),
+            ];
         }
 
         return $content;
@@ -210,7 +218,7 @@ class BlockHelper extends Helper
      *
      * @return null|Response
      */
-    public function render($block, array $options = array())
+    public function render($block, array $options = [])
     {
         $blockContext = $this->blockContextManager->get($block, $options);
 
@@ -218,7 +226,7 @@ class BlockHelper extends Helper
             return '';
         }
 
-        $stats = array();
+        $stats = [];
 
         if ($this->stopwatch) {
             $stats = $this->startTracing($blockContext->getBlock());
@@ -233,10 +241,7 @@ class BlockHelper extends Helper
         $cacheKeys = $response = false;
         $cacheService = $useCache ? $this->getCacheService($blockContext->getBlock(), $stats) : false;
         if ($cacheService) {
-            $cacheKeys = array_merge(
-                $service->getCacheKeys($blockContext->getBlock()),
-                $blockContext->getSetting('extra_cache_keys')
-            );
+            $cacheKeys = array_merge($service->getCacheKeys($blockContext->getBlock()), $blockContext->getSetting('extra_cache_keys'));
 
             if ($this->stopwatch) {
                 $stats['cache']['keys'] = $cacheKeys;
@@ -277,7 +282,7 @@ class BlockHelper extends Helper
             }
 
             $response = $this->blockRenderer->render($blockContext);
-            $contextualKeys = $recorder ? $recorder->pop() : array();
+            $contextualKeys = $recorder ? $recorder->pop() : [];
 
             if ($this->stopwatch) {
                 $stats['cache']['contextual_keys'] = $contextualKeys;
@@ -330,19 +335,21 @@ class BlockHelper extends Helper
 
         $service = $this->blockServiceManager->get($blockContext->getBlock());
 
-        $assets = array(
-            'js' => $service->getJavascripts('all'),
+        $assets = [
+            'js'  => $service->getJavascripts('all'),
             'css' => $service->getStylesheets('all'),
-        );
+        ];
 
         if ($blockContext->getBlock()->hasChildren()) {
-            $iterator = new \RecursiveIteratorIterator(new RecursiveBlockIterator($blockContext->getBlock()->getChildren()));
+            $iterator = new \RecursiveIteratorIterator(new RecursiveBlockIterator($blockContext->getBlock()
+                ->getChildren()));
 
             foreach ($iterator as $block) {
-                $assets = array(
-                    'js' => array_merge($this->blockServiceManager->get($block)->getJavascripts('all'), $assets['js']),
-                    'css' => array_merge($this->blockServiceManager->get($block)->getStylesheets('all'), $assets['css']),
-                );
+                $assets = [
+                    'js'  => array_merge($this->blockServiceManager->get($block)->getJavascripts('all'), $assets['js']),
+                    'css' => array_merge($this->blockServiceManager->get($block)
+                        ->getStylesheets('all'), $assets['css']),
+                ];
             }
         }
 
@@ -350,10 +357,10 @@ class BlockHelper extends Helper
             $stats['assets'] = $assets;
         }
 
-        $this->assets = array(
-            'js' => array_unique(array_merge($assets['js'], $this->assets['js'])),
+        $this->assets = [
+            'js'  => array_unique(array_merge($assets['js'], $this->assets['js'])),
             'css' => array_unique(array_merge($assets['css'], $this->assets['css'])),
-        );
+        ];
     }
 
     /**
@@ -365,28 +372,28 @@ class BlockHelper extends Helper
     {
         $this->traces[$block->getId()] = $this->stopwatch->start(sprintf('%s (id: %s, type: %s)', $block->getName(), $block->getId(), $block->getType()));
 
-        return array(
-            'name' => $block->getName(),
-            'type' => $block->getType(),
-            'duration' => false,
+        return [
+            'name'         => $block->getName(),
+            'type'         => $block->getType(),
+            'duration'     => false,
             'memory_start' => memory_get_usage(true),
-            'memory_end' => false,
-            'memory_peak' => false,
-            'cache' => array(
-                'keys' => array(),
-                'contextual_keys' => array(),
-                'handler' => false,
-                'from_cache' => false,
-                'ttl' => 0,
-                'created_at' => false,
-                'lifetime' => 0,
-                'age' => 0,
-            ),
-            'assets' => array(
-                'js' => array(),
-                'css' => array(),
-            ),
-        );
+            'memory_end'   => false,
+            'memory_peak'  => false,
+            'cache'        => [
+                'keys'            => [],
+                'contextual_keys' => [],
+                'handler'         => false,
+                'from_cache'      => false,
+                'ttl'             => 0,
+                'created_at'      => false,
+                'lifetime'        => 0,
+                'age'             => 0,
+            ],
+            'assets'       => [
+                'js'  => [],
+                'css' => [],
+            ],
+        ];
     }
 
     /**
@@ -397,11 +404,11 @@ class BlockHelper extends Helper
     {
         $e = $this->traces[$block->getId()]->stop();
 
-        $this->traces[$block->getId()] = array_merge($stats, array(
-            'duration' => $e->getDuration(),
-            'memory_end' => memory_get_usage(true),
+        $this->traces[$block->getId()] = array_merge($stats, [
+            'duration'    => $e->getDuration(),
+            'memory_end'  => memory_get_usage(true),
             'memory_peak' => memory_get_peak_usage(true),
-        ));
+        ]);
 
         $this->traces[$block->getId()]['cache']['lifetime'] = $this->traces[$block->getId()]['cache']['age'] + $this->traces[$block->getId()]['cache']['ttl'];
     }
@@ -413,10 +420,10 @@ class BlockHelper extends Helper
      */
     protected function getEventBlocks(BlockEvent $event)
     {
-        $results = array();
+        $results = [];
 
         foreach ($event->getBlocks() as $block) {
-            $results[] = array($block->getId(), $block->getType());
+            $results[] = [$block->getId(), $block->getType()];
         }
 
         return $results;
@@ -429,7 +436,7 @@ class BlockHelper extends Helper
      */
     protected function getEventListeners($eventName)
     {
-        $results = array();
+        $results = [];
 
         foreach ($this->eventDispatcher->getListeners($eventName) as $listener) {
             if (is_object($listener[0])) {
@@ -454,7 +461,7 @@ class BlockHelper extends Helper
      */
     protected function getCacheService(BlockInterface $block, array &$stats = null)
     {
-        if (!$this->cacheManager) {
+        if (!$this->hasCacheManager()) {
             return false;
         }
 
@@ -477,4 +484,29 @@ class BlockHelper extends Helper
 
         return $this->cacheManager->getCacheService($cacheServiceId);
     }
+
+    /**
+     * @return bool
+     */
+    protected function hasCacheManager()
+    {
+        return $this->cacheManager && $this->getCms()->doCache();
+    }
+
+    /**
+     * @return \Isa\Backend\UtilBundle\Twig\AsseticExtension
+     */
+    protected function getBaseAssetExtension()
+    {
+        return $this->container->get('isa.twig.extension.assetic');
+    }
+
+    /**
+     * @return \Symfio\PageBundle\Cms\Cms
+     */
+    protected function getCms()
+    {
+        return $this->container->get('symfio.page.cms');
+    }
 }
+
