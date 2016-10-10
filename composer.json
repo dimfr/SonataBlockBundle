@@ -1,5 +1,5 @@
 {
-    "name": "dimfr/block-bundle",
+    "name": "sonata-project/block-bundle",
     "type": "symfony-bundle",
     "description": "Symfony SonataBlockBundle",
     "keywords": ["sonata", "block"],
